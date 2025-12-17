@@ -1,0 +1,445 @@
+from fastapi import FastAPI, HTTPException, Depends
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import Optional, List
+import os
+import logging
+from contextlib import asynccontextmanager
+from database import connect_to_mongo, close_mongo_connection
+from auth import router as auth_router, get_current_user
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Try to import ctransformers, fallback to llama-cpp-python
+USE_CTRANSFORMERS = None
+ctransformers_available = False
+llama_cpp_available = False
+
+try:
+    from ctransformers import AutoModelForCausalLM
+    ctransformers_available = True
+    logger.info("ctransformers library is available")
+except ImportError:
+    logger.warning("ctransformers not available")
+
+try:
+    from llama_cpp import Llama
+    llama_cpp_available = True
+    logger.info("llama-cpp-python library is available")
+except (ImportError, ValueError, Exception) as e:
+    logger.warning(f"llama-cpp-python not available: {e}")
+    llama_cpp_available = False
+
+# Prefer ctransformers, but allow fallback
+if ctransformers_available:
+    USE_CTRANSFORMERS = True
+    logger.info("Will try to use ctransformers first")
+elif llama_cpp_available:
+    USE_CTRANSFORMERS = False
+    logger.info("Will use llama-cpp-python")
+else:
+    raise ImportError(
+        "Neither ctransformers nor llama-cpp-python is installed.\n"
+        "Install one of them:\n"
+        "  pip install ctransformers\n"
+        "  OR\n"
+        "  pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu"
+    )
+
+# Configuration
+MODEL_PATH = os.getenv("MODEL_PATH", "Llama-3.2-3B-Instruct-Q8_0.gguf")
+# Convert to absolute path if relative
+if not os.path.isabs(MODEL_PATH):
+    MODEL_PATH = os.path.abspath(MODEL_PATH)
+N_CTX = int(os.getenv("N_CTX", "2048"))
+N_THREADS = int(os.getenv("N_THREADS", "4"))
+N_GPU_LAYERS = int(os.getenv("N_GPU_LAYERS", "0"))
+
+# Global model instance
+llm_model = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup and shutdown events"""
+    global llm_model, USE_CTRANSFORMERS
+    
+    # Connect to MongoDB
+    await connect_to_mongo()
+    
+    # Startup
+    try:
+        if not os.path.exists(MODEL_PATH):
+            logger.error(f"Model file not found at {MODEL_PATH}")
+            logger.info(f"Please ensure the GGUF model file is available at {MODEL_PATH}")
+            yield
+            return
+        
+        logger.info(f"Loading model from {MODEL_PATH}")
+        
+        if USE_CTRANSFORMERS:
+            # Using ctransformers - try different model types for Llama 3.2
+            # Try various model types that might work with Llama 3.2
+            model_types_to_try = ["llama", "llama3", "llama-2", None]  # None = auto-detect
+            local_files_options = [False, True]  # Try False first (allows downloading config if needed)
+            
+            loaded = False
+            for local_files_only in local_files_options:
+                for model_type in model_types_to_try:
+                    try:
+                        logger.info(f"Trying to load with model_type={model_type if model_type else 'auto-detect'}, local_files_only={local_files_only}")
+                        # Try with model_file parameter for GGUF files
+                        try:
+                            if model_type:
+                                llm_model = AutoModelForCausalLM.from_pretrained(
+                                    MODEL_PATH,
+                                    model_type=model_type,
+                                    context_length=N_CTX,
+                                    threads=N_THREADS,
+                                    gpu_layers=N_GPU_LAYERS,
+                                    local_files_only=local_files_only,
+                                )
+                            else:
+                                # Auto-detect model type - don't specify model_type
+                                llm_model = AutoModelForCausalLM.from_pretrained(
+                                    MODEL_PATH,
+                                    context_length=N_CTX,
+                                    threads=N_THREADS,
+                                    gpu_layers=N_GPU_LAYERS,
+                                    local_files_only=local_files_only,
+                                )
+                        except Exception as e1:
+                            # If from_pretrained fails, try using model_file parameter directly
+                            logger.debug(f"from_pretrained failed, trying model_file parameter: {e1}")
+                            if model_type:
+                                llm_model = AutoModelForCausalLM(
+                                    model_file=MODEL_PATH,
+                                    model_type=model_type,
+                                    context_length=N_CTX,
+                                    threads=N_THREADS,
+                                    gpu_layers=N_GPU_LAYERS,
+                                )
+                            else:
+                                llm_model = AutoModelForCausalLM(
+                                    model_file=MODEL_PATH,
+                                    context_length=N_CTX,
+                                    threads=N_THREADS,
+                                    gpu_layers=N_GPU_LAYERS,
+                                )
+                        
+                        logger.info(f"Successfully loaded with model_type={model_type if model_type else 'auto-detect'}")
+                        loaded = True
+                        break
+                    except Exception as e:
+                        logger.warning(f"Failed with model_type={model_type if model_type else 'auto-detect'}, local_files_only={local_files_only}: {e}")
+                        continue
+                if loaded:
+                    break
+            
+            if not loaded:
+                # If ctransformers failed but llama-cpp-python is available, try that
+                if llama_cpp_available:
+                    logger.warning("ctransformers failed, trying llama-cpp-python as fallback...")
+                    USE_CTRANSFORMERS = False
+                    llm_model = Llama(
+                        model_path=MODEL_PATH,
+                        n_ctx=N_CTX,
+                        n_threads=N_THREADS,
+                        n_gpu_layers=N_GPU_LAYERS,
+                        verbose=False
+                    )
+                    logger.info("Successfully loaded with llama-cpp-python fallback")
+                else:
+                    error_msg = (
+                        "Failed to load model with ctransformers. All model types failed.\n"
+                        "Possible solutions:\n"
+                        "1. Upgrade ctransformers: pip install --upgrade ctransformers\n"
+                        "2. Install llama-cpp-python (may require Visual C++ Redistributables on Windows):\n"
+                        "   pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu\n"
+                        "   If that fails, try: pip install llama-cpp-python --force-reinstall --no-cache-dir\n"
+                        "3. Check if the GGUF model file is valid and not corrupted"
+                    )
+                    logger.error(error_msg)
+                    raise Exception(error_msg)
+        else:
+            # Using llama-cpp-python
+            llm_model = Llama(
+                model_path=MODEL_PATH,
+                n_ctx=N_CTX,
+                n_threads=N_THREADS,
+                n_gpu_layers=N_GPU_LAYERS,
+                verbose=False
+            )
+        
+        logger.info("Model loaded successfully!")
+        
+    except Exception as e:
+        logger.error(f"Error loading model: {e}")
+        logger.error("=" * 60)
+        logger.error("MODEL LOADING FAILED!")
+        logger.error("=" * 60)
+        try:
+            if USE_CTRANSFORMERS:
+                logger.error("ctransformers failed to load the model.")
+                logger.error("You can try:")
+                logger.error("1. Install llama-cpp-python instead: pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu")
+                logger.error("2. Or check if ctransformers version is compatible: pip install --upgrade ctransformers")
+                logger.error("3. Or try using the llama.cpp server binary (original approach)")
+            else:
+                logger.error("llama-cpp-python failed to load the model.")
+                logger.error("You can try:")
+                logger.error("1. Install ctransformers: pip install ctransformers")
+                logger.error("2. Or check if the model file is valid and accessible")
+        except:
+            logger.error("Unable to determine which library was being used.")
+            logger.error("Try installing: pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu")
+        logger.error("=" * 60)
+        logger.info("The application will start but model endpoints will not work")
+    
+    yield
+    
+    # Shutdown
+    if llm_model:
+        logger.info("Unloading model...")
+        llm_model = None
+        logger.info("Model unloaded")
+    
+    # Close MongoDB connection
+    await close_mongo_connection()
+
+
+app = FastAPI(
+    title="LLM Server with Llama-3.2-3B-Instruct",
+    version="1.0.0",
+    lifespan=lifespan
+)
+
+# CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Include routers
+app.include_router(auth_router)
+
+
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+
+class ChatRequest(BaseModel):
+    messages: List[ChatMessage]
+    temperature: Optional[float] = 0.7
+    max_tokens: Optional[int] = 512
+    top_p: Optional[float] = 0.9
+    top_k: Optional[int] = 40
+    repeat_penalty: Optional[float] = 1.1
+    stop: Optional[List[str]] = None
+
+
+class CompletionRequest(BaseModel):
+    prompt: str
+    temperature: Optional[float] = 0.7
+    max_tokens: Optional[int] = 512
+    top_p: Optional[float] = 0.9
+    top_k: Optional[int] = 40
+    repeat_penalty: Optional[float] = 1.1
+    stop: Optional[List[str]] = None
+
+
+class ChatResponse(BaseModel):
+    message: ChatMessage
+    usage: dict
+
+
+class CompletionResponse(BaseModel):
+    text: str
+    usage: dict
+
+
+def format_messages_for_llama(messages: List[ChatMessage]) -> str:
+    """Format messages for Llama-3.2-Instruct format"""
+    # Llama-3.2-Instruct uses a specific chat template
+    formatted = ""
+    for msg in messages:
+        if msg.role == "system":
+            formatted += f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{msg.content}<|eot_id|>"
+        elif msg.role == "user":
+            formatted += f"<|start_header_id|>user<|end_header_id|>\n\n{msg.content}<|eot_id|>"
+        elif msg.role == "assistant":
+            formatted += f"<|start_header_id|>assistant<|end_header_id|>\n\n{msg.content}<|eot_id|>"
+    
+    # Add assistant header for response
+    formatted += "<|start_header_id|>assistant<|end_header_id|>\n\n"
+    return formatted
+
+
+@app.get("/")
+async def root():
+    """Health check endpoint"""
+    model_loaded = llm_model is not None
+    return {
+        "status": "running",
+        "model_loaded": model_loaded,
+        "model_path": MODEL_PATH,
+        "library": "ctransformers" if USE_CTRANSFORMERS else "llama-cpp-python"
+    }
+
+
+@app.get("/health")
+async def health():
+    """Health check endpoint"""
+    model_loaded = llm_model is not None
+    return {
+        "status": "healthy" if model_loaded else "unhealthy",
+        "model_loaded": model_loaded
+    }
+
+
+@app.post("/v1/chat/completions")
+async def chat_completions(request: ChatRequest, current_user: dict = Depends(get_current_user)):
+    """Chat completions endpoint compatible with OpenAI API (requires authentication)"""
+    if llm_model is None:
+        raise HTTPException(status_code=503, detail="Model not loaded")
+    
+    try:
+        # Format messages for Llama-3.2-Instruct
+        prompt = format_messages_for_llama(request.messages)
+        
+        # Generate response
+        if USE_CTRANSFORMERS:
+            # ctransformers uses max_new_tokens
+            generation_kwargs = {
+                "max_new_tokens": request.max_tokens,
+                "temperature": request.temperature,
+                "top_p": request.top_p,
+                "top_k": request.top_k,
+                "repetition_penalty": request.repeat_penalty,
+            }
+            if request.stop:
+                generation_kwargs["stop"] = request.stop
+            
+            response_text = llm_model(
+                prompt,
+                **generation_kwargs
+            )
+        else:
+            # llama-cpp-python uses max_tokens (not max_new_tokens)
+            # and uses create_completion method which returns a Completion object
+            response = llm_model.create_completion(
+                prompt=prompt,
+                max_tokens=request.max_tokens,
+                temperature=request.temperature,
+                top_p=request.top_p,
+                top_k=request.top_k,
+                repeat_penalty=request.repeat_penalty,
+                stop=request.stop if request.stop else [],
+            )
+            response_text = response["choices"][0]["text"]
+        
+        # Clean up response (remove the prompt if it was included)
+        if response_text.startswith(prompt):
+            response_text = response_text[len(prompt):].strip()
+        
+        # Calculate usage (approximate)
+        prompt_tokens = len(prompt.split())
+        completion_tokens = len(response_text.split())
+        
+        return {
+            "id": "chatcmpl-" + str(hash(prompt)),
+            "object": "chat.completion",
+            "created": int(__import__("time").time()),
+            "model": "llama-3.2-3b-instruct",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": response_text
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens
+            }
+        }
+    except Exception as e:
+        logger.error(f"Error generating chat completion: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/v1/completions")
+async def completions(request: CompletionRequest, current_user: dict = Depends(get_current_user)):
+    """Text completions endpoint (requires authentication)"""
+    if llm_model is None:
+        raise HTTPException(status_code=503, detail="Model not loaded")
+    
+    try:
+        # Generate response
+        if USE_CTRANSFORMERS:
+            # ctransformers uses max_new_tokens
+            generation_kwargs = {
+                "max_new_tokens": request.max_tokens,
+                "temperature": request.temperature,
+                "top_p": request.top_p,
+                "top_k": request.top_k,
+                "repetition_penalty": request.repeat_penalty,
+            }
+            if request.stop:
+                generation_kwargs["stop"] = request.stop
+            
+            response_text = llm_model(
+                request.prompt,
+                **generation_kwargs
+            )
+        else:
+            # llama-cpp-python uses max_tokens (not max_new_tokens)
+            # and uses create_completion method which returns a Completion object
+            response = llm_model.create_completion(
+                prompt=request.prompt,
+                max_tokens=request.max_tokens,
+                temperature=request.temperature,
+                top_p=request.top_p,
+                top_k=request.top_k,
+                repeat_penalty=request.repeat_penalty,
+                stop=request.stop if request.stop else [],
+            )
+            response_text = response["choices"][0]["text"]
+        
+        # Calculate usage (approximate)
+        prompt_tokens = len(request.prompt.split())
+        completion_tokens = len(response_text.split())
+        
+        return {
+            "id": "cmpl-" + str(hash(request.prompt)),
+            "object": "text_completion",
+            "created": int(__import__("time").time()),
+            "model": "llama-3.2-3b-instruct",
+            "choices": [{
+                "index": 0,
+                "text": response_text,
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens
+            }
+        }
+    except Exception as e:
+        logger.error(f"Error generating completion: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+
