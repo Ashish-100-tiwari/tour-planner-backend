@@ -3,6 +3,7 @@ uvicorn[standard]==0.32.1
 pydantic
 httpx>=0.27.0
 requests==2.31.0
+python-dotenv>=1.0.0
 # Option 1: Use ctransformers (recommended - easier to install, works with GGUF)
 ctransformers>=0.2.27
 

@@ -7,6 +7,16 @@ import logging
 from contextlib import asynccontextmanager
 from database import connect_to_mongo, close_mongo_connection
 from auth import router as auth_router, get_current_user
+from dotenv import load_dotenv
+from conversation_memory import (
+    setup_conversation_indexes,
+    store_message,
+    get_conversation_history,
+    clear_conversation_history
+)
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -68,6 +78,9 @@ async def lifespan(app: FastAPI):
     
     # Connect to MongoDB
     await connect_to_mongo()
+    
+    # Set up conversation memory indexes
+    await setup_conversation_indexes()
     
     # Startup
     try:
@@ -237,7 +250,7 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     messages: List[ChatMessage]
     temperature: Optional[float] = 0.7
-    max_tokens: Optional[int] = 512
+    max_tokens: Optional[int] = 200  # ~150 words (1 token ≈ 0.75 words)
     top_p: Optional[float] = 0.9
     top_k: Optional[int] = 40
     repeat_penalty: Optional[float] = 1.1
@@ -247,7 +260,7 @@ class ChatRequest(BaseModel):
 class CompletionRequest(BaseModel):
     prompt: str
     temperature: Optional[float] = 0.7
-    max_tokens: Optional[int] = 512
+    max_tokens: Optional[int] = 200  # ~150 words (1 token ≈ 0.75 words)
     top_p: Optional[float] = 0.9
     top_k: Optional[int] = 40
     repeat_penalty: Optional[float] = 1.1
@@ -310,8 +323,32 @@ async def chat_completions(request: ChatRequest, current_user: dict = Depends(ge
         raise HTTPException(status_code=503, detail="Model not loaded")
     
     try:
+        user_email = current_user.get("email")
+        
+        # Retrieve conversation history from MongoDB
+        history = await get_conversation_history(user_email)
+        
+        # Combine history with current request messages
+        # History is already in chronological order (oldest first)
+        all_messages = []
+        
+        # Add historical messages
+        for hist_msg in history:
+            all_messages.append(ChatMessage(
+                role=hist_msg["role"],
+                content=hist_msg["content"]
+            ))
+        
+        # Add current request messages
+        all_messages.extend(request.messages)
+        
+        # Store the user's current message(s) in the database
+        for msg in request.messages:
+            if msg.role == "user":
+                await store_message(user_email, "user", msg.content)
+        
         # Format messages for Llama-3.2-Instruct
-        prompt = format_messages_for_llama(request.messages)
+        prompt = format_messages_for_llama(all_messages)
         
         # Generate response
         if USE_CTRANSFORMERS:
@@ -347,6 +384,9 @@ async def chat_completions(request: ChatRequest, current_user: dict = Depends(ge
         # Clean up response (remove the prompt if it was included)
         if response_text.startswith(prompt):
             response_text = response_text[len(prompt):].strip()
+        
+        # Store the assistant's response in the database
+        await store_message(user_email, "assistant", response_text)
         
         # Calculate usage (approximate)
         prompt_tokens = len(prompt.split())
@@ -436,6 +476,33 @@ async def completions(request: CompletionRequest, current_user: dict = Depends(g
         }
     except Exception as e:
         logger.error(f"Error generating completion: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/v1/conversations/clear")
+async def clear_conversations(current_user: dict = Depends(get_current_user)):
+    """
+    Clear conversation history for the current user
+    Manually removes all stored messages (they would auto-expire after 30 minutes anyway)
+    """
+    try:
+        user_email = current_user.get("email")
+        success = await clear_conversation_history(user_email)
+        
+        if success:
+            return {
+                "status": "success",
+                "message": "Conversation history cleared"
+            }
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to clear conversation history"
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error clearing conversations: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
