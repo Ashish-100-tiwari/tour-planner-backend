@@ -14,6 +14,12 @@ from conversation_memory import (
     get_conversation_history,
     clear_conversation_history
 )
+from google_maps_service import (
+    extract_locations_from_text,
+    format_journey_summary,
+    generate_map_image_url
+)
+from travel_agent_prompt import get_travel_agent_prompt
 
 # Load environment variables from .env file
 load_dotenv()
@@ -249,8 +255,8 @@ class ChatMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     messages: List[ChatMessage]
-    temperature: Optional[float] = 0.7
-    max_tokens: Optional[int] = 200  # ~150 words (1 token ≈ 0.75 words)
+    temperature: Optional[float] = 0.5      # Optimized: reduced from 0.7 for faster generation
+    max_tokens: Optional[int] = 100         # Optimized: reduced from 200 for faster responses
     top_p: Optional[float] = 0.9
     top_k: Optional[int] = 40
     repeat_penalty: Optional[float] = 1.1
@@ -281,13 +287,23 @@ def format_messages_for_llama(messages: List[ChatMessage]) -> str:
     """Format messages for Llama-3.2-Instruct format"""
     # Llama-3.2-Instruct uses a specific chat template
     formatted = ""
+    is_first_message = True
+    
     for msg in messages:
         if msg.role == "system":
-            formatted += f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{msg.content}<|eot_id|>"
+            # Only add begin_of_text for the very first system message
+            if is_first_message:
+                formatted += f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{msg.content}<|eot_id|>"
+                is_first_message = False
+            else:
+                # Subsequent system messages don't need begin_of_text
+                formatted += f"<|start_header_id|>system<|end_header_id|>\n\n{msg.content}<|eot_id|>"
         elif msg.role == "user":
             formatted += f"<|start_header_id|>user<|end_header_id|>\n\n{msg.content}<|eot_id|>"
+            is_first_message = False
         elif msg.role == "assistant":
             formatted += f"<|start_header_id|>assistant<|end_header_id|>\n\n{msg.content}<|eot_id|>"
+            is_first_message = False
     
     # Add assistant header for response
     formatted += "<|start_header_id|>assistant<|end_header_id|>\n\n"
@@ -332,12 +348,52 @@ async def chat_completions(request: ChatRequest, current_user: dict = Depends(ge
         # History is already in chronological order (oldest first)
         all_messages = []
         
+        # Add travel agent system prompt at the beginning
+        system_prompt = get_travel_agent_prompt()
+        all_messages.append(ChatMessage(
+            role="system",
+            content=system_prompt
+        ))
+        
         # Add historical messages
         for hist_msg in history:
             all_messages.append(ChatMessage(
                 role=hist_msg["role"],
                 content=hist_msg["content"]
             ))
+        
+        # Check if user message contains location information
+        journey_info = None
+        map_image_url = None
+        detected_origin = None
+        detected_destination = None
+        
+        for msg in request.messages:
+            if msg.role == "user":
+                # Try to extract origin and destination
+                origin, destination = extract_locations_from_text(msg.content)
+                
+                if origin and destination:
+                    # Store for later use
+                    detected_origin = origin
+                    detected_destination = destination
+                    
+                    # Fetch journey information from Google Maps
+                    logger.info(f"Detected journey request: {origin} to {destination}")
+                    journey_info = format_journey_summary(origin, destination)
+                    
+                    # Generate map image URL
+                    map_image_url = generate_map_image_url(origin, destination)
+                    
+                    if journey_info:
+                        # Add journey information as a system message before user's message
+                        all_messages.append(ChatMessage(
+                            role="system",
+                            content=f"[JOURNEY DATA FROM GOOGLE MAPS]\n{journey_info}\n[Use this information to provide a helpful travel summary to the user]"
+                        ))
+                        logger.info("Successfully retrieved journey information from Google Maps")
+                    else:
+                        logger.warning("Failed to retrieve journey information from Google Maps")
         
         # Add current request messages
         all_messages.extend(request.messages)
@@ -385,8 +441,8 @@ async def chat_completions(request: ChatRequest, current_user: dict = Depends(ge
         if response_text.startswith(prompt):
             response_text = response_text[len(prompt):].strip()
         
-        # Store the assistant's response in the database
-        await store_message(user_email, "assistant", response_text)
+        # Note: Only user messages are stored in conversation history
+        # Assistant responses are NOT stored to save database space
         
         # Calculate usage (approximate)
         prompt_tokens = len(prompt.split())
@@ -409,7 +465,13 @@ async def chat_completions(request: ChatRequest, current_user: dict = Depends(ge
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "total_tokens": prompt_tokens + completion_tokens
-            }
+            },
+            # Include map image URL if journey was detected
+            "map_image_url": map_image_url,
+            "journey_details": {
+                "origin": detected_origin,
+                "destination": detected_destination
+            } if detected_origin and detected_destination else None
         }
     except Exception as e:
         logger.error(f"Error generating chat completion: {e}")
