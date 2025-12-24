@@ -1,3 +1,7 @@
+# Load environment variables FIRST, before any other imports that use them
+from dotenv import load_dotenv
+load_dotenv()
+
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -7,7 +11,6 @@ import logging
 from contextlib import asynccontextmanager
 from database import connect_to_mongo, close_mongo_connection
 from auth import router as auth_router, get_current_user
-from dotenv import load_dotenv
 from conversation_memory import (
     setup_conversation_indexes,
     store_message,
@@ -20,9 +23,6 @@ from google_maps_service import (
     generate_map_image_url
 )
 from travel_agent_prompt import get_travel_agent_prompt
-
-# Load environment variables from .env file
-load_dotenv()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -538,6 +538,73 @@ async def completions(request: CompletionRequest, current_user: dict = Depends(g
         }
     except Exception as e:
         logger.error(f"Error generating completion: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+
+
+class MapRequest(BaseModel):
+    origin: str
+    destination: str
+    zoom: Optional[int] = None
+    size: Optional[str] = "600x400"
+
+
+class MapResponse(BaseModel):
+    map_image_url: str
+    zoom_level: Optional[int]
+    origin: str
+    destination: str
+
+
+@app.post("/v1/map/generate", response_model=MapResponse)
+async def generate_map(request: MapRequest, current_user: dict = Depends(get_current_user)):
+    """
+    Generate a map image URL with optional zoom level (requires authentication)
+    
+    Args:
+        request: MapRequest with origin, destination, optional zoom and size
+        current_user: Authenticated user from JWT token
+    
+    Returns:
+        MapResponse with map_image_url and metadata
+    """
+    try:
+        # Validate zoom level if provided
+        if request.zoom is not None:
+            if request.zoom < 1 or request.zoom > 21:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Zoom level must be between 1 and 21"
+                )
+        
+        # Generate map image URL
+        map_url = generate_map_image_url(
+            origin=request.origin,
+            destination=request.destination,
+            size=request.size,
+            zoom=request.zoom
+        )
+        
+        if not map_url:
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to generate map image URL"
+            )
+        
+        logger.info(f"Generated map for {request.origin} to {request.destination} with zoom={request.zoom}")
+        
+        return MapResponse(
+            map_image_url=map_url,
+            zoom_level=request.zoom,
+            origin=request.origin,
+            destination=request.destination
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error generating map: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

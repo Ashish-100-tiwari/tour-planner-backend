@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Map Zoom Test</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            max-width: 900px;
+            width: 100%;
+            padding: 30px;
+        }
+
+        h1 {
+            color: #333;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+
+        .controls {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+
+        .input-group {
+            flex: 1;
+            min-width: 200px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 5px;
+            color: #555;
+            font-weight: 500;
+        }
+
+        input {
+            width: 100%;
+            padding: 10px 15px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 14px;
+            transition: border-color 0.3s;
+        }
+
+        input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .zoom-controls {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 20px;
+            justify-content: center;
+        }
+
+        .zoom-btn {
+            background: #667eea;
+            color: white;
+            border: none;
+            width: 50px;
+            height: 50px;
+            border-radius: 50%;
+            font-size: 24px;
+            cursor: pointer;
+            transition: all 0.3s;
+            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3);
+        }
+
+        .zoom-btn:hover {
+            background: #5568d3;
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(102, 126, 234, 0.4);
+        }
+
+        .zoom-btn:active {
+            transform: translateY(0);
+        }
+
+        .zoom-btn:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+            box-shadow: none;
+        }
+
+        .zoom-level {
+            font-size: 18px;
+            font-weight: 600;
+            color: #333;
+            min-width: 100px;
+            text-align: center;
+        }
+
+        .generate-btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 12px 30px;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3);
+            width: 100%;
+        }
+
+        .generate-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(102, 126, 234, 0.4);
+        }
+
+        .map-container {
+            margin-top: 20px;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
+            position: relative;
+            min-height: 400px;
+            background: #f5f5f5;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .map-container img {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+
+        .loading {
+            color: #667eea;
+            font-size: 18px;
+        }
+
+        .error {
+            color: #e74c3c;
+            padding: 15px;
+            background: #ffe5e5;
+            border-radius: 8px;
+            margin-top: 10px;
+        }
+
+        .info {
+            background: #e8f4f8;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            color: #2c3e50;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🗺️ Map Zoom Test</h1>
+        
+        <div class="info">
+            <strong>Instructions:</strong> Enter origin and destination, then use the zoom controls to zoom in/out on the map.
+        </div>
+
+        <div class="controls">
+            <div class="input-group">
+                <label for="origin">Origin</label>
+                <input type="text" id="origin" placeholder="e.g., New York" value="New York">
+            </div>
+            <div class="input-group">
+                <label for="destination">Destination</label>
+                <input type="text" id="destination" placeholder="e.g., Boston" value="Boston">
+            </div>
+        </div>
+
+        <div class="controls">
+            <div class="input-group">
+                <label for="token">Auth Token</label>
+                <input type="password" id="token" placeholder="Your JWT token">
+            </div>
+        </div>
+
+        <button class="generate-btn" onclick="generateMap()">Generate Map</button>
+
+        <div class="zoom-controls" style="display: none;" id="zoomControls">
+            <button class="zoom-btn" onclick="zoomOut()" id="zoomOutBtn">−</button>
+            <div class="zoom-level" id="zoomLevel">Zoom: Auto</div>
+            <button class="zoom-btn" onclick="zoomIn()" id="zoomInBtn">+</button>
+        </div>
+
+        <div class="map-container" id="mapContainer">
+            <div class="loading">Click "Generate Map" to start</div>
+        </div>
+
+        <div id="error" class="error" style="display: none;"></div>
+    </div>
+
+    <script>
+        let currentZoom = null;
+        let currentOrigin = '';
+        let currentDestination = '';
+        const MIN_ZOOM = 1;
+        const MAX_ZOOM = 21;
+        const API_BASE = 'http://localhost:8000';
+
+        async function generateMap(zoom = null) {
+            const origin = document.getElementById('origin').value.trim();
+            const destination = document.getElementById('destination').value.trim();
+            const token = document.getElementById('token').value.trim();
+            const errorDiv = document.getElementById('error');
+            const mapContainer = document.getElementById('mapContainer');
+
+            errorDiv.style.display = 'none';
+
+            if (!origin || !destination) {
+                showError('Please enter both origin and destination');
+                return;
+            }
+
+            if (!token) {
+                showError('Please enter your auth token');
+                return;
+            }
+
+            currentOrigin = origin;
+            currentDestination = destination;
+            if (zoom !== null) {
+                currentZoom = zoom;
+            }
+
+            mapContainer.innerHTML = '<div class="loading">Loading map...</div>';
+
+            try {
+                const response = await fetch(`${API_BASE}/v1/map/generate`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${token}`
+                    },
+                    body: JSON.stringify({
+                        origin: origin,
+                        destination: destination,
+                        zoom: currentZoom,
+                        size: '600x400'
+                    })
+                });
+
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.detail || 'Failed to generate map');
+                }
+
+                const data = await response.json();
+                
+                mapContainer.innerHTML = `<img src="${data.map_image_url}" alt="Map from ${origin} to ${destination}">`;
+                
+                // Show zoom controls
+                document.getElementById('zoomControls').style.display = 'flex';
+                updateZoomDisplay();
+
+            } catch (error) {
+                showError(error.message);
+                mapContainer.innerHTML = '<div class="loading">Failed to load map</div>';
+            }
+        }
+
+        function zoomIn() {
+            if (currentZoom === null) {
+                currentZoom = 10; // Start at a default zoom
+            } else if (currentZoom < MAX_ZOOM) {
+                currentZoom++;
+            }
+            generateMap(currentZoom);
+        }
+
+        function zoomOut() {
+            if (currentZoom === null) {
+                currentZoom = 10; // Start at a default zoom
+            } else if (currentZoom > MIN_ZOOM) {
+                currentZoom--;
+            }
+            generateMap(currentZoom);
+        }
+
+        function updateZoomDisplay() {
+            const zoomLevel = document.getElementById('zoomLevel');
+            const zoomInBtn = document.getElementById('zoomInBtn');
+            const zoomOutBtn = document.getElementById('zoomOutBtn');
+
+            if (currentZoom === null) {
+                zoomLevel.textContent = 'Zoom: Auto';
+                zoomInBtn.disabled = false;
+                zoomOutBtn.disabled = false;
+            } else {
+                zoomLevel.textContent = `Zoom: ${currentZoom}`;
+                zoomInBtn.disabled = currentZoom >= MAX_ZOOM;
+                zoomOutBtn.disabled = currentZoom <= MIN_ZOOM;
+            }
+        }
+
+        function showError(message) {
+            const errorDiv = document.getElementById('error');
+            errorDiv.textContent = message;
+            errorDiv.style.display = 'block';
+        }
+
+        // Keyboard shortcuts
+        document.addEventListener('keydown', (e) => {
+            if (e.key === '+' || e.key === '=') {
+                e.preventDefault();
+                zoomIn();
+            } else if (e.key === '-' || e.key === '_') {
+                e.preventDefault();
+                zoomOut();
+            }
+        });
+    </script>
+</body>
+</html>

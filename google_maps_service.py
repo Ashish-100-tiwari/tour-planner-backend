@@ -234,7 +234,13 @@ def format_journey_summary(origin: str, destination: str) -> Optional[str]:
         return None
 
 
-def generate_map_image_url(origin: str, destination: str, size: str = "600x400") -> Optional[str]:
+def generate_map_image_url(
+    origin: str, 
+    destination: str, 
+    size: str = "600x400",
+    zoom: Optional[int] = None,
+    scale: int = 2
+) -> Optional[str]:
     """
     Generate a Google Maps Static API URL showing the route from origin to destination
     
@@ -242,6 +248,8 @@ def generate_map_image_url(origin: str, destination: str, size: str = "600x400")
         origin: Starting location
         destination: End location
         size: Image size in format "widthxheight" (max 640x640 for free tier)
+        zoom: Optional zoom level (1-21). If None, Google Maps auto-calculates best zoom
+        scale: Scale factor for higher resolution (1 or 2, default 2 for retina displays)
     
     Returns:
         URL to the static map image or None if API key not available
@@ -257,31 +265,74 @@ def generate_map_image_url(origin: str, destination: str, size: str = "600x400")
         destination_encoded = urllib.parse.quote(destination)
         
         # Build the Static Maps API URL
-        # This creates a map with markers at origin (green) and destination (red)
-        # and draws the route path between them
         base_url = "https://maps.googleapis.com/maps/api/staticmap"
         
-        # Parameters
-        params = [
-            f"size={size}",
-            f"markers=color:green|label:A|{origin_encoded}",
-            f"markers=color:red|label:B|{destination_encoded}",
-            f"path=weight:3|color:blue|enc:",  # Will add encoded polyline
-            f"key={GOOGLE_MAPS_API_KEY}"
-        ]
-        
-        # Get directions to extract the polyline
+        # Get directions to extract the polyline and center point
         directions = get_directions(origin, destination)
-        if directions and len(directions) > 0:
-            # Extract the overview polyline from the route
-            polyline = directions[0].get('overview_polyline', {}).get('points', '')
-            if polyline:
-                # Replace the path parameter with the encoded polyline
-                params[3] = f"path=weight:3|color:0x0000ff|enc:{polyline}"
+        
+        if zoom is not None:
+            # When zoom is specified, we need to use center parameter
+            # Calculate center point from the route
+            center_lat = None
+            center_lng = None
+            
+            if directions and len(directions) > 0:
+                # Get bounds from the route
+                bounds = directions[0].get('bounds', {})
+                if bounds:
+                    ne = bounds.get('northeast', {})
+                    sw = bounds.get('southwest', {})
+                    if ne and sw:
+                        # Calculate center point
+                        center_lat = (ne.get('lat', 0) + sw.get('lat', 0)) / 2
+                        center_lng = (ne.get('lng', 0) + sw.get('lng', 0)) / 2
+            
+            # Validate zoom level (Google Maps supports 0-21, but we'll use 1-21)
+            zoom = max(1, min(21, zoom))
+            
+            # Build params with center and zoom
+            params = [
+                f"size={size}",
+                f"scale={scale}",
+                f"markers=color:green|label:A|{origin_encoded}",
+                f"markers=color:red|label:B|{destination_encoded}",
+                f"key={GOOGLE_MAPS_API_KEY}"
+            ]
+            
+            # Add center if we calculated it, otherwise use origin
+            if center_lat is not None and center_lng is not None:
+                params.insert(2, f"center={center_lat},{center_lng}")
+            else:
+                params.insert(2, f"center={origin_encoded}")
+            
+            params.insert(3, f"zoom={zoom}")
+            
+            # Add path with polyline if available
+            if directions and len(directions) > 0:
+                polyline = directions[0].get('overview_polyline', {}).get('points', '')
+                if polyline:
+                    params.insert(4, f"path=weight:3|color:0x0000ff|enc:{polyline}")
+        
+        else:
+            # When zoom is None, use path to auto-fit the route
+            params = [
+                f"size={size}",
+                f"scale={scale}",
+                f"markers=color:green|label:A|{origin_encoded}",
+                f"markers=color:red|label:B|{destination_encoded}",
+                f"key={GOOGLE_MAPS_API_KEY}"
+            ]
+            
+            # Add polyline path for auto-fit
+            if directions and len(directions) > 0:
+                polyline = directions[0].get('overview_polyline', {}).get('points', '')
+                if polyline:
+                    # Insert path before key parameter
+                    params.insert(-1, f"path=weight:3|color:0x0000ff|enc:{polyline}")
         
         map_url = f"{base_url}?{'&'.join(params)}"
         
-        logger.info(f"Generated map image URL for route from {origin} to {destination}")
+        logger.info(f"Generated map image URL for route from {origin} to {destination} with zoom={zoom}")
         return map_url
         
     except Exception as e:
