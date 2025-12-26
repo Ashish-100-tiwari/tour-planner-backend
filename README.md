@@ -10,6 +10,13 @@ A FastAPI-based backend service for a tour planning application with LLM-powered
 - 💾 **MongoDB** - User data and conversation history storage
 - 📝 **Conversation Memory** - TTL-based message history (30 minutes)
 
+Demo Images
+<img width="1366" height="768" alt="tp-1" src="https://github.com/user-attachments/assets/cf475fa9-5c54-4ba5-a879-18786fbfc7c2" />
+<img width="1366" height="721" alt="tp-2" src="https://github.com/user-attachments/assets/1f886cff-b4f0-45b8-8b3d-8a0fd2ea1009" />
+<img width="1366" height="722" alt="tp-3" src="https://github.com/user-attachments/assets/20e08d8a-70c9-4cc9-9d34-aab6ac67cf6d" />
+<img width="1366" height="720" alt="tp-4" src="https://github.com/user-attachments/assets/e9eea36c-46cf-4602-8090-faba3276f07f" />
+
+
 ## Prerequisites
 
 - Python 3.10+
