@@ -111,12 +111,22 @@ async def get_user_by_email(email: str):
     """Get user by email from database"""
     db = get_database()
     if db is None:
+        logger.error("Database connection is None in get_user_by_email")
         return None
-    user = await db.users.find_one({"email": email.lower()})
-    if user:
-        user["id"] = str(user["_id"])
-        del user["_id"]
-    return user
+    try:
+        email_lower = email.lower()
+        logger.debug(f"Querying database for user with email: {email_lower}")
+        user = await db.users.find_one({"email": email_lower})
+        if user:
+            user["id"] = str(user["_id"])
+            del user["_id"]
+            logger.debug(f"User found in database: {user.get('email')}")
+        else:
+            logger.debug(f"No user found in database for email: {email_lower}")
+        return user
+    except Exception as e:
+        logger.error(f"Error querying database for user: {e}")
+        return None
 
 
 async def create_user(user_data: dict):
@@ -187,10 +197,11 @@ async def signup(request: SignUpRequest):
     - **confirm_password**: Password confirmation (must match password)
     """
     try:
+        logger.info(f"Signup attempt for email: {request.email}")
         user_data = request.model_dump()
         user = await create_user(user_data)
         
-        logger.info(f"New user registered: {user['email']}")
+        logger.info(f"New user registered successfully: {user['email']}")
         
         return UserResponse(
             id=user["id"],
@@ -219,20 +230,29 @@ async def signin(request: SignInRequest):
     Returns JWT access token
     """
     try:
+        logger.info(f"Signin attempt for email: {request.email}")
+        
         # Get user from database
         user = await get_user_by_email(request.email)
         if not user:
+            logger.warning(f"Signin failed: User not found for email: {request.email}")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Incorrect email or password"
             )
         
+        logger.info(f"User found: {user.get('email')}, verifying password...")
+        
         # Verify password
-        if not verify_password(request.password, user["password"]):
+        password_valid = verify_password(request.password, user["password"])
+        if not password_valid:
+            logger.warning(f"Signin failed: Invalid password for email: {request.email}")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Incorrect email or password"
             )
+        
+        logger.info(f"Password verified successfully for: {request.email}")
         
         # Create access token
         access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)

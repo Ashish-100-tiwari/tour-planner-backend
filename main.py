@@ -637,5 +637,36 @@ async def clear_conversations(current_user: dict = Depends(get_current_user)):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    import socket
+    
+    # Get port from environment variable or default to 8000
+    port = int(os.getenv("PORT", 8000))
+    
+    # Try to find an available port starting from the specified port
+    def find_free_port(start_port):
+        for port in range(start_port, start_port + 10):
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.bind(('0.0.0.0', port))
+                    return port
+            except OSError:
+                continue
+        return None
+    
+    # Check if the specified port is available
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(('0.0.0.0', port))
+        logger.info(f"Starting server on port {port}")
+    except OSError:
+        logger.warning(f"Port {port} is already in use, trying to find an available port...")
+        free_port = find_free_port(port)
+        if free_port:
+            port = free_port
+            logger.info(f"Found available port: {port}")
+        else:
+            logger.error(f"Could not find an available port starting from {port}")
+            raise
+    
+    uvicorn.run(app, host="0.0.0.0", port=port)
 
